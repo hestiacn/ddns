@@ -42,3 +42,17 @@ jobs:
             fi
             git push origin main
           fi
+      - name: Delete old runs
+        if: always()
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          gh run list --repo ${{ github.repository }} \
+            --workflow "${{ github.workflow }}" \
+            --limit 200 \
+            --json databaseId,createdAt \
+            | jq -r '.[] | select((now - (.createdAt | fromdateiso8601)) > 2*86400) | .databaseId' \
+            | while read id; do
+                echo "[INFO] 删除 run: $id"
+                gh run delete "$id" --repo ${{ github.repository }} || true
+              done
