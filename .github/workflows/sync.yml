@@ -23,25 +23,42 @@ jobs:
 
       - name: Sync upstream changes
         run: |
+          set -e
           git config user.name "GH Action - Upstream Sync"
           git config user.email "action@github.com"
-
-          git remote add upstream https://github.com/cmliu/edgetunnel.git
+      
+          git remote add upstream https://github.com/cmliu/edgetunnel.git || true
           git fetch upstream main
-
+      
+          # 1. 先保存本地 nginx()
+          python3 keep_nginx.py extract
+      
+          # 2. 整体同步上游（保留本地其它改动）
           if git diff --quiet HEAD upstream/main; then
-            # 内容和上游一致，直接对齐，顺带清理历史分叉留下的多余 merge commit
+            # 和上游完全一致，直接对齐
             git reset --hard upstream/main
             git push --force-with-lease origin main
           else
-            # 有本地修改，保持原来的合并方式，不覆盖任何人的改动
+            # 有本地改动，合并上游
             if ! git pull --no-rebase upstream main; then
               echo "[Error] 合并上游变更产生冲突，自动同步已暂停，请手动 Sync Fork 并解决冲突。"
               echo "[Error] Merge conflict detected while syncing upstream. Please sync your fork manually and resolve the conflicts."
               exit 1
             fi
+          fi
+      
+          # 3. 合并后，把本地 nginx() 替换回去
+          python3 keep_nginx.py replace
+      
+          # 4. 提交推送
+          if git diff --quiet; then
+            echo "[INFO] 无变化，跳过提交"
+          else
+            git add _worker.js
+            git commit -m "chore: sync upstream, keep local nginx()"
             git push origin main
           fi
+          
       - name: Delete old runs
         if: always()
         env:
