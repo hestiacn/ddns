@@ -68,7 +68,13 @@ jobs:
 
           # 5. 提交推送
           if git diff --quiet; then
-            echo "[INFO] 无文件变化，跳过提交"
+            echo "[INFO] 工作区无文件变化。"
+            if [ "$LOCAL_VER" != "$NEW_VER" ]; then
+               echo "🚀 发现版本更新 ($LOCAL_VER -> $NEW_VER)，正在推送合并记录..."
+               git push origin main || true
+            else
+               echo "✅ [INFO] 版本号无变化 ($NEW_VER)，跳过提交"
+            fi
           else
             git add _worker.js
             git commit -m "chore: sync upstream (v$NEW_VER), keep local nginx()"
