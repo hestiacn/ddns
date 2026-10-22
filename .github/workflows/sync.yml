@@ -5,7 +5,7 @@ permissions:
   actions: write
 on:
   schedule:
-    - cron: "0 0 * * *" # every day
+    - cron: "0 0 * * *" # 每天执行
   workflow_dispatch:
 
 jobs:
@@ -26,11 +26,15 @@ jobs:
           set -e
           git config user.name "GH Action - Upstream Sync"
           git config user.email "action@github.com"
+          
+          # 0. 在同步前，获取本地当前的版本号
+          LOCAL_VER=$(grep -oP "const Version = '\K[^']+" _worker.js || echo "unknown")
+          echo "[INFO] 本地当前版本: $LOCAL_VER"
       
           git remote add upstream https://github.com/cmliu/edgetunnel.git || true
           git fetch upstream main
-      
-          # 1. 先保存本地 nginx()
+          
+          # 1. 保存本地 nginx()
           python3 keep_nginx.py extract
       
           # 2. 整体同步上游（保留本地其它改动）
@@ -49,13 +53,25 @@ jobs:
       
           # 3. 合并后，把本地 nginx() 替换回去
           python3 keep_nginx.py replace
-      
-          # 4. 提交推送
+          
+          # 4. 比对同步后的版本号
+          NEW_VER=$(grep -oP "const Version = '\K[^']+" _worker.js || echo "unknown")
+          echo "[INFO] 同步后上游版本: $NEW_VER"
+          
+          if [ "$LOCAL_VER" != "$NEW_VER" ]; then
+            echo "🚀 [NOTICE] 发现上游版本更新: $LOCAL_VER -> $NEW_VER"
+            # 如果你想把新版本号打印在 GitHub Step Summary 里：
+            echo "### 🚀 上游版本更新: $LOCAL_VER -> $NEW_VER" >> $GITHUB_STEP_SUMMARY
+          else
+            echo "✅ [INFO] 版本号无变化 ($NEW_VER)"
+          fi
+
+          # 5. 提交推送
           if git diff --quiet; then
-            echo "[INFO] 无变化，跳过提交"
+            echo "[INFO] 无文件变化，跳过提交"
           else
             git add _worker.js
-            git commit -m "chore: sync upstream, keep local nginx()"
+            git commit -m "chore: sync upstream (v$NEW_VER), keep local nginx()"
             git push origin main
           fi
           
