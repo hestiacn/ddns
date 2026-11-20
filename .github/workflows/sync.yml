@@ -2,10 +2,10 @@ name: Upstream Sync
 
 permissions:
   contents: write
-
+  actions: write
 on:
   schedule:
-    - cron: "0 0 * * *" # every day
+    - cron: "0 0 * * *" # 每天执行
   workflow_dispatch:
 
 jobs:
@@ -23,22 +23,87 @@ jobs:
 
       - name: Sync upstream changes
         run: |
+          set -e
           git config user.name "GH Action - Upstream Sync"
           git config user.email "action@github.com"
 
-          git remote add upstream https://github.com/cmliu/edgetunnel.git
+          # 0. 获取本地当前版本号
+          LOCAL_VER=$(grep -oP "const Version = '\K[^']+" _worker.js || echo "unknown")
+          echo "[INFO] 本地当前版本: $LOCAL_VER"
+
+          git remote add upstream https://github.com/cmliu/edgetunnel.git || true
           git fetch upstream main
 
+          # 1. 提取本地 nginx()
+          python3 keep_nginx.py extract
+
+          # 2. 同步上游
           if git diff --quiet HEAD upstream/main; then
-            # 内容和上游一致，直接对齐，顺带清理历史分叉留下的多余 merge commit
+            # 和上游完全一致，直接对齐
             git reset --hard upstream/main
             git push --force-with-lease origin main
           else
-            # 有本地修改，保持原来的合并方式，不覆盖任何人的改动
-            if ! git pull --no-rebase upstream main; then
-              echo "[Error] 合并上游变更产生冲突，自动同步已暂停，请手动 Sync Fork 并解决冲突。"
-              echo "[Error] Merge conflict detected while syncing upstream. Please sync your fork manually and resolve the conflicts."
-              exit 1
+            # 有本地改动，合并上游
+            if git merge upstream/main; then
+              echo "[INFO] 合并成功，无冲突"
+            else
+              # 检查是否真的产生了冲突（有未合并文件）
+              CONFLICTS=$(git diff --name-only --diff-filter=U)
+              if [ -n "$CONFLICTS" ]; then
+                echo "[WARN] 合并冲突，采用上游版本 _worker.js，随后恢复本地 nginx()"
+                echo "[WARN] 冲突文件: $CONFLICTS"
+                git checkout --theirs _worker.js
+                git add _worker.js
+                # 不提交，等第 3 步替换 nginx() 后统一提交
+              else
+                echo "[Error] 合并失败（非冲突原因），终止同步"
+                git merge --abort 2>/dev/null || true
+                exit 1
+              fi
             fi
+          fi
+
+          # 3. 用本地 nginx() 整体替换上游 nginx()
+          python3 keep_nginx.py replace
+
+          # 4. 比对同步后的版本号
+          NEW_VER=$(grep -oP "const Version = '\K[^']+" _worker.js || echo "unknown")
+          echo "[INFO] 同步后上游版本: $NEW_VER"
+
+          if [ "$LOCAL_VER" != "$NEW_VER" ]; then
+            echo "🚀 [NOTICE] 发现上游版本更新: $LOCAL_VER -> $NEW_VER"
+            # 如果你想把新版本号打印在 GitHub Step Summary 里：
+            echo "### 🚀 上游版本更新: $LOCAL_VER -> $NEW_VER" >> $GITHUB_STEP_SUMMARY
+          else
+            echo "✅ [INFO] 版本号无变化 ($NEW_VER)"
+          fi
+
+          # 5. 提交推送
+          if git diff --quiet && git diff --cached --quiet; then
+            echo "[INFO] 工作区无文件变化。"
+            if [ "$LOCAL_VER" != "$NEW_VER" ]; then
+              echo "🚀 发现版本更新 ($LOCAL_VER -> $NEW_VER)，正在推送合并记录..."
+              git push origin main || true
+            else
+              echo "✅ [INFO] 版本号无变化 ($NEW_VER)，跳过提交"
+            fi
+          else
+            git add _worker.js
+            git commit -m "chore: sync upstream (v$NEW_VER), keep local nginx()"
             git push origin main
           fi
+
+      - name: Delete old runs
+        if: always()
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          gh run list --repo ${{ github.repository }} \
+            --workflow "${{ github.workflow }}" \
+            --limit 200 \
+            --json databaseId,createdAt \
+            | jq -r '.[] | select((now - (.createdAt | fromdateiso8601)) > 2*86400) | .databaseId' \
+            | while read id; do
+                echo "[INFO] 删除 run: $id"
+                gh run delete "$id" --repo ${{ github.repository }} || true
+              done
